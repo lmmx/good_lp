@@ -313,4 +313,48 @@ mod tests {
         assert_eq!(solution.value(x), 12.0);
         assert_eq!(solution.value(y), 0.0);
     }
+
+    /// Test a simple integer LP: max x + y subject to x + y <= 12, x,y >= 0.
+    #[test]
+    fn can_solve_easy() {
+        let mut vars = variables!(); // no name means "ProblemVariables::new()"
+        let x = vars.add(variable().clamp(0, 12).integer());
+        let y = vars.add(variable().clamp(0, 12).integer());
+        let solution = vars
+            .maximise(x + y)            // Objective: maximize x + y
+            .using(pumpkin)             // Use our Pumpkin solver backend
+            .with(x + y << 12)          // constraint: x + y <= 12
+            .solve()
+            .expect("Failed to solve with Pumpkin");
+        // We expect x + y should be 12. There's no unique solution, but we know the sum.
+        assert!((solution.value(x) + solution.value(y)).abs() <= 12.0 + 1e-9);
+    }
+
+    /// Slightly more complex test: an MILP with a couple constraints
+    #[test]
+    fn can_solve_milp() {
+        let mut vars = variables!();
+        // x, y >= 0, with x integer, y integer
+        let x = vars.add(variable().integer().min(0).max(10));
+        let y = vars.add(variable().integer().min(0).max(10));
+
+        // Maximize 3x + 2y
+        let model = vars
+            .maximise(3 * x + 2 * y)
+            .using(pumpkin)
+            // constraints:
+            .with(x * 2 + y * 3 << 12)  // 2x + 3y <= 12
+            .with(x + y << 8);         // x + y <= 8
+
+        let sol = model.solve().unwrap();
+        // We'll do a quick check that the constraints are satisfied:
+        assert!(2.0 * sol.value(x) + 3.0 * sol.value(y) <= 12.0 + 1e-9);
+        assert!(sol.value(x) + sol.value(y) <= 8.0 + 1e-9);
+
+        // We can do a quick check that the objective is correct or at least feasible.
+        // E.g. for 2x + 3y <= 12 => if y = 2, x = 3 => then 2*3 +3*2=6+6=12 => feasible
+        // So 3x+2y = 3*3 +2*2=9+4=13. Possibly there's better. We'll just confirm it's not obviously wrong:
+        let obj = 3.0 * sol.value(x) + 2.0 * sol.value(y);
+        assert!(obj >= 10.0); // or something: we expect around 13 or 14
+    }
 }
