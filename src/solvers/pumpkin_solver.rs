@@ -4,11 +4,11 @@ use std::collections::HashMap;
 
 use pumpkin_solver::results::{OptimisationResult, ProblemSolution, SatisfactionResult};
 use pumpkin_solver::termination::Indefinite;
-use pumpkin_solver::variables::{IntegerVariable, TransformableVariable};
+use pumpkin_solver::variables::TransformableVariable;
 use pumpkin_solver::{constraints, Solver};
 
 use crate::expression::LinearExpression;
-use crate::variable::{UnsolvedProblem};
+use crate::variable::UnsolvedProblem;
 use crate::{
     constraint::ConstraintReference,
     solvers::{ObjectiveDirection, ResolutionError, Solution, SolverModel},
@@ -70,19 +70,16 @@ impl PumpkinProblem {
         &mut self.solver
     }
 
-    /// Convert a linear expression to a list of pumpkin variables and coefficients
+    /// Convert a linear expression to a list of pumpkin variables (example helper).
+    /// Currently unused; remove or mark as `#[allow(dead_code)]`.
+    #[allow(dead_code)]
     fn expression_to_pumpkin(&self, expr: &LinearExpression) -> Vec<pumpkin_solver::variables::DomainId> {
         let mut pumpkin_vars = Vec::new();
-
-        for (var, coeff) in expr.coefficients.iter() {
+        for (var, _coeff) in expr.coefficients.iter() {
             // Get the Pumpkin variable corresponding to the good_lp variable
             let pumpkin_var = self.variables.get(var).expect("Variable not found");
-            
-            // For now, just add the variable directly
-            // We'll handle coefficients during constraint construction if needed
             pumpkin_vars.push(*pumpkin_var);
         }
-
         pumpkin_vars
     }
 }
@@ -98,9 +95,12 @@ impl SolverModel for PumpkinProblem {
 
         // If there's an objective function, optimize it
         if !self.objective.linear.coefficients.is_empty() {
-            // For optimization, we need to handle the objective function
-            // We'll focus on optimizing a single variable with the highest coefficient
-            let (obj_var, obj_coeff) = self.objective.linear.coefficients.iter()
+            // For optimization, we handle the objective function
+            let (obj_var, obj_coeff) = self
+                .objective
+                .linear
+                .coefficients
+                .iter()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
                 .expect("Objective function is empty");
                 
@@ -129,13 +129,7 @@ impl SolverModel for PumpkinProblem {
 
             // Process the result
             match result {
-                OptimisationResult::Optimal(solution) => {
-                    Ok(PumpkinSolution {
-                        solution,
-                        variables: self.variables,
-                    })
-                }
-                OptimisationResult::Satisfiable(solution) => {
+                OptimisationResult::Optimal(solution) | OptimisationResult::Satisfiable(solution) => {
                     Ok(PumpkinSolution {
                         solution,
                         variables: self.variables,
@@ -147,12 +141,10 @@ impl SolverModel for PumpkinProblem {
         } else {
             // Otherwise, just find a feasible solution
             match self.solver.satisfy(&mut brancher, &mut termination) {
-                SatisfactionResult::Satisfiable(solution) => {
-                    Ok(PumpkinSolution {
-                        solution,
-                        variables: self.variables,
-                    })
-                }
+                SatisfactionResult::Satisfiable(solution) => Ok(PumpkinSolution {
+                    solution,
+                    variables: self.variables,
+                }),
                 SatisfactionResult::Unsatisfiable => Err(ResolutionError::Infeasible),
                 SatisfactionResult::Unknown => Err(ResolutionError::Other("Unknown")),
             }
@@ -167,7 +159,6 @@ impl SolverModel for PumpkinProblem {
 
         // Get the variables and coefficients
         let mut pumpkin_vars_with_coeff = Vec::new();
-        
         for (var, coeff) in constraint.expression.linear.coefficients.iter() {
             let pumpkin_var = self.variables.get(var).expect("Variable not found");
             pumpkin_vars_with_coeff.push((*pumpkin_var, *coeff as i32));
@@ -177,7 +168,6 @@ impl SolverModel for PumpkinProblem {
         
         // Add the appropriate constraint type
         if constraint.is_equality {
-            // For equality constraints, we need to create a weighted sum
             let mut weighted_vars = Vec::new();
             for (var, coeff) in pumpkin_vars_with_coeff {
                 if coeff != 1 {
@@ -186,7 +176,8 @@ impl SolverModel for PumpkinProblem {
                     weighted_vars.push(var.into());
                 }
             }
-            self.solver
+            let _ = self
+                .solver
                 .add_constraint(constraints::equals(weighted_vars, constant))
                 .post();
         } else {
@@ -199,7 +190,8 @@ impl SolverModel for PumpkinProblem {
                     weighted_vars.push(var.into());
                 }
             }
-            self.solver
+            let _ = self
+                .solver
                 .add_constraint(constraints::less_than_or_equals(weighted_vars, constant))
                 .post();
         }
@@ -215,22 +207,33 @@ impl SolverModel for PumpkinProblem {
 impl ModelWithSOS1 for PumpkinProblem {
     fn add_sos1<I: IntoAffineExpression>(&mut self, variables_and_weights: I) {
         // Get the variables from the expression
-        let sos_vars = variables_and_weights.linear_coefficients()
+        let sos_vars = variables_and_weights
+            .linear_coefficients()
             .into_iter()
             .filter_map(|(var, _weight)| self.variables.get(&var).copied())
             .collect::<Vec<_>>();
         
-        // We implement SOS1 constraints using Pumpkin's all_different constraint
-        // and limit values to 0 and 1 to ensure at most one variable is 1
+        // We implement SOS1 constraints using the logic:
+        // - each variable is in [0,1]
+        // - sum is at most 1
         if !sos_vars.is_empty() {
-            // First, ensure all variables are in the range [0, 1]
+            // Ensure each variable is in range [0, 1]
             for &var in &sos_vars {
-                self.solver.add_constraint(constraints::less_than_or_equals(vec![var], 1)).post();
-                self.solver.add_constraint(constraints::less_than_or_equals(vec![var.scaled(-1)], 0)).post();
+                let _ = self
+                    .solver
+                    .add_constraint(constraints::less_than_or_equals(vec![var], 1))
+                    .post();
+                let _ = self
+                    .solver
+                    .add_constraint(constraints::less_than_or_equals(vec![var.scaled(-1)], 0))
+                    .post();
             }
             
             // Then ensure the sum is at most 1
-            self.solver.add_constraint(constraints::less_than_or_equals(sos_vars, 1)).post();
+            let _ = self
+                .solver
+                .add_constraint(constraints::less_than_or_equals(sos_vars, 1))
+                .post();
         }
     }
 }
@@ -249,15 +252,21 @@ impl CardinalityConstraintSolver for PumpkinProblem {
             .copied()
             .collect();
 
-        // Implement as a sum of binary decision variables <= rhs
-        // Ensure all variables are in the range [0, 1]
+        // Ensure each variable is in [0, 1]
         for &var in &pumpkin_vars {
-            self.solver.add_constraint(constraints::less_than_or_equals(vec![var], 1)).post();
-            self.solver.add_constraint(constraints::less_than_or_equals(vec![var.scaled(-1)], 0)).post();
+            let _ = self
+                .solver
+                .add_constraint(constraints::less_than_or_equals(vec![var], 1))
+                .post();
+            let _ = self
+                .solver
+                .add_constraint(constraints::less_than_or_equals(vec![var.scaled(-1)], 0))
+                .post();
         }
         
         // Then add the constraint that the sum is at most rhs
-        self.solver
+        let _ = self
+            .solver
             .add_constraint(constraints::less_than_or_equals(pumpkin_vars, rhs as i32))
             .post();
 
@@ -284,9 +293,9 @@ impl Solution for PumpkinSolution {
 
 #[cfg(test)]
 mod tests {
-    use crate::{variables, variable, Solution, constraint, SolverModel};
     use super::pumpkin;
-    
+    use crate::{variables, variable, Solution, constraint, SolverModel};
+
     #[test]
     fn can_solve_simple_problem() {
         let mut vars = variables!();
