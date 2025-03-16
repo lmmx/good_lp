@@ -243,8 +243,8 @@ impl PumpkinProblem {
     fn build_objective_var(&mut self) -> (DomainId, i32) {
         // offset is the integer portion of self.objective.constant
         let offset = i32_or_panic(self.objective.constant, "objective constant");
-        let lb = i32::MIN;
-        let ub = i32::MAX;
+        let lb = -1000;
+        let ub = 1000;
         let obj_var = self.solver.new_bounded_integer(lb, ub);
         (obj_var, offset)
     }
