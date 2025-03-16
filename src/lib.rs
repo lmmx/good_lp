@@ -165,7 +165,7 @@ pub const default_solver: LpSolver<
     feature = "scip",
     feature = "cplex-rs",
     feature = "clarabel",
-    feature = "pumpkin_solver",
+    feature = "pumpkin-solver",
 )))]
 compile_error!(
     "No solver available. \
