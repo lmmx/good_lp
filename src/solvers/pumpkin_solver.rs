@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 
 use pumpkin_solver::constraints;
-use pumpkin_solver::results::{SatisfactionResult, ProblemSolution};
+use pumpkin_solver::results::{SatisfactionResult, OptimisationResult, Solution as PumpkinSolution, ProblemSolution};
 use pumpkin_solver::termination::Indefinite;
 use pumpkin_solver::variables::TransformableVariable;
 use pumpkin_solver::Solver as PumpkinSolver;
 
-use crate::variable::{UnsolvedProblem, VariableDefinition};
+use crate::variable::UnsolvedProblem;
 use crate::{
     constraint::ConstraintReference,
     solvers::{ObjectiveDirection, ResolutionError, Solution, SolverModel},
@@ -26,6 +26,7 @@ pub fn pumpkin(to_solve: UnsolvedProblem) -> PumpkinProblem {
 
     let mut pumpkin = PumpkinSolver::default();
     let mut var_map = HashMap::new();
+    let mut objective_coeffs = HashMap::new();
     
     // Create variables in Pumpkin
     for (var, def) in variables.iter_variables_with_def() {
@@ -42,14 +43,17 @@ pub fn pumpkin(to_solve: UnsolvedProblem) -> PumpkinProblem {
         var_map.insert(var, pumpkin_var);
     }
 
-    // Store the objective information for later use when solving
-    let objective_coeffs: HashMap<Variable, f64> = objective.linear.coefficients;
+    // Convert objective coefficients to standard HashMap
+    for (var, coef) in objective.linear.coefficients {
+        objective_coeffs.insert(var, coef);
+    }
 
     PumpkinProblem {
         pumpkin,
         var_map,
         objective_coeffs,
         objective_direction: direction,
+        constraints_added: 0,
     }
 }
 
@@ -59,10 +63,11 @@ pub struct PumpkinProblem {
     var_map: HashMap<Variable, pumpkin_solver::variables::DomainId>,
     objective_coeffs: HashMap<Variable, f64>,
     objective_direction: ObjectiveDirection,
+    constraints_added: usize,
 }
 
 impl SolverModel for PumpkinProblem {
-    type Solution = PumpkinSolution;
+    type Solution = PumpkinSolverSolution;
     type Error = ResolutionError;
 
     fn solve(mut self) -> Result<Self::Solution, Self::Error> {
@@ -84,10 +89,13 @@ impl SolverModel for PumpkinProblem {
             
             // Add the constraint linking the objective variable to the linear combination
             if !linear_terms.is_empty() {
-                self.pumpkin
+                linear_terms.push(obj_var.scaled(-1));
+                match self.pumpkin
                     .add_constraint(constraints::equals(linear_terms, 0))
-                    .post()
-                    .map_err(|_| ResolutionError::Other("Failed to add objective constraint"))?;
+                    .post() {
+                    Ok(_) => {}
+                    Err(_) => return Err(ResolutionError::Other("Failed to add objective constraint")),
+                }
             }
             
             Some(obj_var)
@@ -99,39 +107,53 @@ impl SolverModel for PumpkinProblem {
         let mut brancher = self.pumpkin.default_brancher_over_all_propositional_variables();
         let mut termination = Indefinite;
 
-        // Solve the problem
-        let result = if let Some(obj_var) = objective_var {
-            match self.objective_direction {
+        // Solve the problem based on whether it's an optimization or satisfaction problem
+        if let Some(obj_var) = objective_var {
+            let opt_result = match self.objective_direction {
                 ObjectiveDirection::Minimisation => {
                     self.pumpkin.minimise(&mut brancher, &mut termination, obj_var)
                 }
                 ObjectiveDirection::Maximisation => {
                     self.pumpkin.maximise(&mut brancher, &mut termination, obj_var)
                 }
+            };
+
+            match opt_result {
+                OptimisationResult::Optimal(solution) | OptimisationResult::Satisfiable(solution) => {
+                    Ok(PumpkinSolverSolution {
+                        solution,
+                        var_map: self.var_map,
+                    })
+                }
+                OptimisationResult::Unsatisfiable => {
+                    Err(ResolutionError::Infeasible)
+                }
+                OptimisationResult::Unknown => {
+                    Err(ResolutionError::Other("Solver terminated without finding a solution"))
+                }
             }
         } else {
-            self.pumpkin.satisfy(&mut brancher, &mut termination)
-        };
-
-        // Convert the result to the expected return type
-        match result {
-            SatisfactionResult::Satisfiable(solution) | pumpkin_solver::results::OptimisationResult::Optimal(solution) | pumpkin_solver::results::OptimisationResult::Satisfiable(solution) => {
-                Ok(PumpkinSolution {
-                    solution,
-                    var_map: self.var_map,
-                })
-            }
-            SatisfactionResult::Unsatisfiable | pumpkin_solver::results::OptimisationResult::Unsatisfiable => {
-                Err(ResolutionError::Infeasible)
-            }
-            SatisfactionResult::Unknown | pumpkin_solver::results::OptimisationResult::Unknown => {
-                Err(ResolutionError::Other("Solver terminated without finding a solution"))
+            // Simple satisfaction problem
+            match self.pumpkin.satisfy(&mut brancher, &mut termination) {
+                SatisfactionResult::Satisfiable(solution) => {
+                    Ok(PumpkinSolverSolution {
+                        solution,
+                        var_map: self.var_map,
+                    })
+                }
+                SatisfactionResult::Unsatisfiable => {
+                    Err(ResolutionError::Infeasible)
+                }
+                SatisfactionResult::Unknown => {
+                    Err(ResolutionError::Other("Solver terminated without finding a solution"))
+                }
             }
         }
     }
 
     fn add_constraint(&mut self, constraint: Constraint) -> ConstraintReference {
-        let index = self.pumpkin.default_brancher_over_all_propositional_variables().n_decision_levels() as usize;
+        let index = self.constraints_added;
+        self.constraints_added += 1;
 
         // Extract linear terms from the constraint
         let mut linear_terms = Vec::new();
@@ -169,12 +191,12 @@ impl SolverModel for PumpkinProblem {
 }
 
 /// A Pumpkin solution
-pub struct PumpkinSolution {
-    solution: ProblemSolution,
+pub struct PumpkinSolverSolution {
+    solution: PumpkinSolution,
     var_map: HashMap<Variable, pumpkin_solver::variables::DomainId>,
 }
 
-impl Solution for PumpkinSolution {
+impl Solution for PumpkinSolverSolution {
     fn value(&self, variable: Variable) -> f64 {
         // Get the Pumpkin variable
         let pumpkin_var = self.var_map[&variable];
